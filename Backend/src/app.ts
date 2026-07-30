@@ -15,48 +15,46 @@ app.use(cors({
     credentials:true
 }))
 
-// Helper to extract text from LangChain message or string
+// Helper to extract text from LangChain message/chunk or string
 function extractContent(response: any): string {
-    console.log('🔍 Extracting content from response type:', response?.constructor?.name);
-    
+    // Handle string directly
     if (typeof response === 'string') {
-        console.log('✓ Found string response');
         return response;
     }
     
     if (typeof response === 'object' && response !== null) {
-        // LangChain AIMessage object
-        if (response.content && typeof response.content === 'string') {
-            console.log('✓ Found message.content (string)');
-            return response.content;
+        // LangChain AIMessageChunk or AIMessage - priority: content property
+        if (response.content !== undefined && response.content !== null) {
+            // If content is a string, return it directly
+            if (typeof response.content === 'string') {
+                return response.content;
+            }
+            
+            // If content is an array, join them
+            if (Array.isArray(response.content)) {
+                return response.content
+                    .map((c: any) => typeof c === 'string' ? c : c?.text || c?.content || '')
+                    .filter((s: string) => s.length > 0)
+                    .join('');
+            }
         }
         
-        // Fallback for complex content
-        if (response.content && Array.isArray(response.content)) {
-            console.log('✓ Found message.content (array)');
-            return response.content
-                .map((c: any) => typeof c === 'string' ? c : c?.text || c?.content || '')
-                .join('');
-        }
-        
+        // Fallback for other properties
         if (response.text && typeof response.text === 'string') {
-            console.log('✓ Found response.text');
             return response.text;
         }
         
         if (response.output && typeof response.output === 'string') {
-            console.log('✓ Found response.output');
             return response.output;
         }
         
         if (response.message && typeof response.message === 'string') {
-            console.log('✓ Found response.message');
             return response.message;
         }
     }
     
-    console.log('⚠️ Could not extract content, converting to string');
-    return String(response || '');
+    // Empty string for null/undefined values
+    return '';
 }
 
 // Judge function
@@ -118,52 +116,43 @@ app.post("/invoke",async (req,res)=>{
     res.setHeader('Access-Control-Allow-Origin', '*');
     
     try {
-        console.log('🚀 Starting model invocations...');
+        console.log('🚀 Starting real-time model streaming...');
         
-        // Invoke both models in parallel
-        const [response1, response2] = await Promise.all([
-            mistralAIModel.invoke(problem),
-            cohereModel.invoke(problem)
-        ]);
+        let solution1 = '';
+        let solution2 = '';
         
-        console.log('📦 Response 1 type:', response1?.constructor?.name);
-        console.log('📦 Response 2 type:', response2?.constructor?.name);
+        // Stream solution 1 in real-time
+        console.log('⏳ Starting Solution 1 streaming...');
+        const stream1 = await mistralAIModel.stream(problem);
         
-        // Extract content using helper function
-        const solution1 = extractContent(response1);
-        const solution2 = extractContent(response2);
-        
-        console.log(`✅ Got responses - Solution 1: ${solution1.length} chars, Solution 2: ${solution2.length} chars`);
-        console.log('📄 Solution 1 preview:', solution1.substring(0, 100));
-        console.log('📄 Solution 2 preview:', solution2.substring(0, 100));
-        
-        // Stream solution 1 in chunks - faster and smoother
-        const chunkSize = 10;
-        const chunkDelay = 15; // milliseconds between chunks for smooth rendering
-        
-        console.log(`⏳ Starting Solution 1 stream with ${chunkSize} char chunks, ${chunkDelay}ms delay`);
-        for (let i = 0; i < solution1.length; i += chunkSize) {
-            const chunk = solution1.substring(i, i + chunkSize);
-            const eventData = `data: ${JSON.stringify({solution_1_chunk: chunk})}\n\n`;
-            res.write(eventData);
-            await new Promise(resolve => setTimeout(resolve, chunkDelay));
+        for await (const chunk of stream1) {
+            const content = extractContent(chunk);
+            if (content) {
+                solution1 += content;
+                res.write(`data: ${JSON.stringify({solution_1_chunk: content})}\n\n`);
+                console.log('📝 Solution 1 chunk streamed:', content.length, 'chars');
+            }
         }
         
-        console.log('📝 Solution 1 streaming complete');
+        console.log('✅ Solution 1 streaming complete, total:', solution1.length, 'chars');
         
         // Small delay between solutions
         await new Promise(resolve => setTimeout(resolve, 100));
         
-        // Stream solution 2 in chunks - faster and smoother
-        console.log(`⏳ Starting Solution 2 stream with ${chunkSize} char chunks, ${chunkDelay}ms delay`);
-        for (let i = 0; i < solution2.length; i += chunkSize) {
-            const chunk = solution2.substring(i, i + chunkSize);
-            const eventData = `data: ${JSON.stringify({solution_2_chunk: chunk})}\n\n`;
-            res.write(eventData);
-            await new Promise(resolve => setTimeout(resolve, chunkDelay));
+        // Stream solution 2 in real-time
+        console.log('⏳ Starting Solution 2 streaming...');
+        const stream2 = await cohereModel.stream(problem);
+        
+        for await (const chunk of stream2) {
+            const content = extractContent(chunk);
+            if (content) {
+                solution2 += content;
+                res.write(`data: ${JSON.stringify({solution_2_chunk: content})}\n\n`);
+                console.log('📝 Solution 2 chunk streamed:', content.length, 'chars');
+            }
         }
         
-        console.log('📝 Solution 2 streaming complete');
+        console.log('✅ Solution 2 streaming complete, total:', solution2.length, 'chars');
         console.log('⚖️ Running judge...');
         
         // Run judge on complete solutions
